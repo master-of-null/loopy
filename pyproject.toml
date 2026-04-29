@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loopy"
+version = "0.1.0"
+description = "A tiny prompt-driven iterate/review loop for coding agents."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7",
+]
+
+[project.scripts]
+loopy = "loopy.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loopy"]
