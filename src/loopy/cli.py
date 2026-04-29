@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
                 runs_dir=args.runs_dir.resolve(),
                 reviewer_dir=_resolve_prompt_dir(args.reviewer_dir, "reviewer"),
                 diff_scope=args.diff_scope,
+                artifact_mode=args.artifact_mode,
             )
             result = run_review_only(config)
         else:
@@ -40,8 +41,12 @@ def main(argv: list[str] | None = None) -> int:
                 evaluator_dir=_resolve_prompt_dir(args.evaluator_dir, "evaluator"),
                 reviewer_dir=_resolve_prompt_dir(args.reviewer_dir, "reviewer"),
                 max_iters=args.max_iters,
+                artifact_mode=args.artifact_mode,
             )
             result = run_loopy(config)
+    except KeyboardInterrupt:
+        print("\nloopy interrupted.", file=sys.stderr)
+        return 130
     except Exception as exc:
         print(f"\nloopy failed: {exc}", file=sys.stderr)
         return 2
@@ -128,6 +133,16 @@ def _add_shared_arguments(parser: ArgumentParser, *, suppress_defaults: bool = F
         type=Path,
         default=_default(Path("runs"), suppress=suppress_defaults),
         help="Directory where run artifacts are saved.",
+    )
+    parser.add_argument(
+        "--artifact-mode",
+        choices=["essential", "debug", "full"],
+        default=_default("essential", suppress=suppress_defaults),
+        help=(
+            "Artifact capture mode. 'essential' saves only task/context and merged "
+            "reports; 'debug'/'full' preserves per-call prompts, outputs, logs, "
+            "metadata, schemas, and parsed reviews."
+        ),
     )
 
 

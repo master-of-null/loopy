@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import json
 import subprocess
+import tempfile
 from typing import Literal
 
 from pydantic import ValidationError
@@ -75,6 +78,10 @@ next_instructions do not apply.
 """
 
 
+ArtifactMode = Literal["essential", "debug", "full"]
+DiffScope = Literal["unstaged", "staged", "all"]
+
+
 @dataclass(frozen=True)
 class LoopyConfig:
     engine: str
@@ -85,9 +92,7 @@ class LoopyConfig:
     evaluator_dir: Path
     reviewer_dir: Path
     max_iters: int
-
-
-DiffScope = Literal["unstaged", "staged", "all"]
+    artifact_mode: ArtifactMode = "essential"
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,7 @@ class ReviewOnlyConfig:
     runs_dir: Path
     reviewer_dir: Path
     diff_scope: DiffScope
+    artifact_mode: ArtifactMode = "essential"
 
 
 RunConfig = LoopyConfig | ReviewOnlyConfig
@@ -111,6 +117,20 @@ class LoopyResult:
     last_review: ReviewResult | None
 
 
+@contextmanager
+def _artifact_root(config: RunConfig, run: RunPaths) -> Iterator[Path]:
+    if _preserve_debug_artifacts(config):
+        yield run.root
+        return
+
+    with tempfile.TemporaryDirectory(prefix="loopy-artifacts-") as temporary_root:
+        yield Path(temporary_root)
+
+
+def _preserve_debug_artifacts(config: RunConfig) -> bool:
+    return config.artifact_mode in {"debug", "full"}
+
+
 def run_loopy(config: LoopyConfig) -> LoopyResult:
     implementer_prompts = load_prompt_files(config.implementer_dir)
     evaluator_prompts = load_prompt_files(config.evaluator_dir)
@@ -120,123 +140,132 @@ def run_loopy(config: LoopyConfig) -> LoopyResult:
     run.task.write_text(config.original_task, encoding="utf-8")
 
     adapter = AgentAdapter()
-    schema_path = _write_review_schema(run)
+    with _artifact_root(config, run) as artifact_root:
+        schema_path = _write_review_schema(artifact_root)
 
-    print(f"\n== loopy run: {run.root} ==")
-    print("\n== context ==")
-    project_context = _run_context(config=config, run=run, adapter=adapter)
-
-    previous_review: str | None = None
-    last_review: ReviewResult | None = None
-
-    for iteration in range(1, config.max_iters + 1):
-        iteration_dir = run.iteration_dir(iteration)
-        iteration_dir.mkdir(parents=True, exist_ok=True)
-        iteration_goal = _iteration_goal(iteration)
-        print(f"\n== iteration {iteration} ==")
-
-        implementation_outputs = _run_prompt_sequence(
+        print(f"\n== loopy run: {run.root} ==")
+        print("\n== context ==")
+        project_context = _run_context(
             config=config,
             run=run,
             adapter=adapter,
-            prompts=implementer_prompts,
-            project_context=project_context,
-            previous_review=previous_review,
-            implementation_reports=None,
-            evaluation_reports=None,
-            iteration_goal=iteration_goal,
-            iteration=iteration,
-            role="implementer",
-            readonly=False,
-        )
-        assert implementation_outputs is not None
-        implementation_reports = _format_implementation_reports(
-            prompts=implementer_prompts,
-            outputs=implementation_outputs,
-        )
-        (iteration_dir / "implementation-reports.md").write_text(
-            implementation_reports,
-            encoding="utf-8",
+            artifact_root=artifact_root,
         )
 
-        evaluation_results = _run_prompt_sequence(
-            config=config,
-            run=run,
-            adapter=adapter,
-            prompts=evaluator_prompts,
-            project_context=project_context,
-            previous_review=previous_review,
-            implementation_reports=implementation_reports,
-            evaluation_reports=None,
-            iteration_goal=iteration_goal,
-            iteration=iteration,
-            role="evaluator",
-            readonly=True,
-            schema_path=schema_path,
-            parse_reviews=True,
-        )
-        assert evaluation_results is not None
-        evaluation_review = _merge_review_results(evaluation_results)
-        evaluation_report = evaluation_review.model_dump_json(indent=2)
-        (iteration_dir / "evaluation.merged.json").write_text(
-            evaluation_report,
-            encoding="utf-8",
-        )
+        previous_review: str | None = None
+        last_review: ReviewResult | None = None
 
-        if not evaluation_review.acceptable:
-            print("\n== evaluation failed; skipping reviewer ==")
-            last_review = evaluation_review
+        for iteration in range(1, config.max_iters + 1):
+            iteration_dir = run.iteration_dir(iteration)
+            iteration_dir.mkdir(parents=True, exist_ok=True)
+            iteration_goal = _iteration_goal(iteration)
+            print(f"\n== iteration {iteration} ==")
+
+            implementation_outputs = _run_prompt_sequence(
+                config=config,
+                run=run,
+                adapter=adapter,
+                artifact_root=artifact_root,
+                prompts=implementer_prompts,
+                project_context=project_context,
+                previous_review=previous_review,
+                implementation_reports=None,
+                evaluation_reports=None,
+                iteration_goal=iteration_goal,
+                iteration=iteration,
+                role="implementer",
+                readonly=False,
+            )
+            assert implementation_outputs is not None
+            implementation_reports = _format_implementation_reports(
+                prompts=implementer_prompts,
+                outputs=implementation_outputs,
+            )
+            (iteration_dir / "implementation-reports.md").write_text(
+                implementation_reports,
+                encoding="utf-8",
+            )
+
+            evaluation_results = _run_prompt_sequence(
+                config=config,
+                run=run,
+                adapter=adapter,
+                artifact_root=artifact_root,
+                prompts=evaluator_prompts,
+                project_context=project_context,
+                previous_review=previous_review,
+                implementation_reports=implementation_reports,
+                evaluation_reports=None,
+                iteration_goal=iteration_goal,
+                iteration=iteration,
+                role="evaluator",
+                readonly=True,
+                schema_path=schema_path,
+                parse_reviews=True,
+            )
+            assert evaluation_results is not None
+            evaluation_review = _merge_review_results(evaluation_results)
+            evaluation_report = evaluation_review.model_dump_json(indent=2)
+            (iteration_dir / "evaluation.merged.json").write_text(
+                evaluation_report,
+                encoding="utf-8",
+            )
+
+            if not evaluation_review.acceptable:
+                print("\n== evaluation failed; skipping reviewer ==")
+                last_review = evaluation_review
+                _write_json(
+                    iteration_dir / "review.merged.json",
+                    last_review.model_dump(mode="json"),
+                )
+                previous_review = last_review.model_dump_json(indent=2)
+                continue
+
+            review_results = _run_prompt_sequence(
+                config=config,
+                run=run,
+                adapter=adapter,
+                artifact_root=artifact_root,
+                prompts=reviewer_prompts,
+                project_context=project_context,
+                previous_review=previous_review,
+                implementation_reports=implementation_reports,
+                evaluation_reports=evaluation_report,
+                iteration_goal=iteration_goal,
+                iteration=iteration,
+                role="reviewer",
+                readonly=True,
+                schema_path=schema_path,
+                parse_reviews=True,
+            )
+
+            assert review_results is not None
+            last_review = _merge_review_results(review_results)
             _write_json(
                 iteration_dir / "review.merged.json",
                 last_review.model_dump(mode="json"),
             )
             previous_review = last_review.model_dump_json(indent=2)
-            continue
 
-        review_results = _run_prompt_sequence(
-            config=config,
-            run=run,
-            adapter=adapter,
-            prompts=reviewer_prompts,
-            project_context=project_context,
-            previous_review=previous_review,
-            implementation_reports=implementation_reports,
-            evaluation_reports=evaluation_report,
-            iteration_goal=iteration_goal,
-            iteration=iteration,
-            role="reviewer",
-            readonly=True,
-            schema_path=schema_path,
-            parse_reviews=True,
-        )
+            if last_review.acceptable:
+                print("\n== accepted ==")
+                print(last_review.summary)
+                return LoopyResult(
+                    accepted=True,
+                    run=run,
+                    iterations=iteration,
+                    last_review=last_review,
+                )
 
-        assert review_results is not None
-        last_review = _merge_review_results(review_results)
-        _write_json(
-            iteration_dir / "review.merged.json",
-            last_review.model_dump(mode="json"),
-        )
-        previous_review = last_review.model_dump_json(indent=2)
-
-        if last_review.acceptable:
-            print("\n== accepted ==")
+            print("\n== review requires another pass ==")
             print(last_review.summary)
-            return LoopyResult(
-                accepted=True,
-                run=run,
-                iterations=iteration,
-                last_review=last_review,
-            )
 
-        print("\n== review requires another pass ==")
-        print(last_review.summary)
-
-    return LoopyResult(
-        accepted=False,
-        run=run,
-        iterations=config.max_iters,
-        last_review=last_review,
-    )
+        return LoopyResult(
+            accepted=False,
+            run=run,
+            iterations=config.max_iters,
+            last_review=last_review,
+        )
 
 
 def run_review_only(config: ReviewOnlyConfig) -> LoopyResult:
@@ -247,60 +276,77 @@ def run_review_only(config: ReviewOnlyConfig) -> LoopyResult:
     run.task.write_text(config.original_task, encoding="utf-8")
 
     adapter = AgentAdapter()
-    schema_path = _write_review_schema(run)
-    (run.root / "review-target.patch").write_text(review_target, encoding="utf-8")
+    with _artifact_root(config, run) as artifact_root:
+        schema_path = _write_review_schema(artifact_root)
+        if _preserve_debug_artifacts(config):
+            (run.root / "review-target.patch").write_text(
+                review_target,
+                encoding="utf-8",
+            )
 
-    print(f"\n== loopy review-only run: {run.root} ==")
-    print("\n== context ==")
-    project_context = _run_context(config=config, run=run, adapter=adapter)
+        print(f"\n== loopy review-only run: {run.root} ==")
+        print("\n== context ==")
+        project_context = _run_context(
+            config=config,
+            run=run,
+            adapter=adapter,
+            artifact_root=artifact_root,
+        )
 
-    iteration = 1
-    iteration_dir = run.iteration_dir(iteration)
-    iteration_dir.mkdir(parents=True, exist_ok=True)
-    (iteration_dir / "implementation-reports.md").write_text(
-        review_target,
-        encoding="utf-8",
-    )
+        iteration = 1
+        iteration_dir = run.iteration_dir(iteration)
+        iteration_dir.mkdir(parents=True, exist_ok=True)
+        (iteration_dir / "implementation-reports.md").write_text(
+            review_target,
+            encoding="utf-8",
+        )
 
-    print(f"\n== review-only ({config.diff_scope}) ==")
-    review_results = _run_prompt_sequence(
-        config=config,
-        run=run,
-        adapter=adapter,
-        prompts=reviewer_prompts,
-        project_context=project_context,
-        previous_review=None,
-        implementation_reports=review_target,
-        evaluation_reports=None,
-        iteration_goal=_review_only_goal(config.diff_scope),
-        iteration=iteration,
-        role="reviewer",
-        readonly=True,
-        schema_path=schema_path,
-        parse_reviews=True,
-    )
-    assert review_results is not None
-    last_review = _merge_review_results(review_results)
-    _write_json(
-        iteration_dir / "review.merged.json",
-        last_review.model_dump(mode="json"),
-    )
+        print(f"\n== review-only ({config.diff_scope}) ==")
+        review_results = _run_prompt_sequence(
+            config=config,
+            run=run,
+            adapter=adapter,
+            artifact_root=artifact_root,
+            prompts=reviewer_prompts,
+            project_context=project_context,
+            previous_review=None,
+            implementation_reports=review_target,
+            evaluation_reports=None,
+            iteration_goal=_review_only_goal(config.diff_scope),
+            iteration=iteration,
+            role="reviewer",
+            readonly=True,
+            schema_path=schema_path,
+            parse_reviews=True,
+        )
+        assert review_results is not None
+        last_review = _merge_review_results(review_results)
+        _write_json(
+            iteration_dir / "review.merged.json",
+            last_review.model_dump(mode="json"),
+        )
 
-    if last_review.acceptable:
-        print("\n== accepted ==")
-    else:
-        print("\n== review found blockers ==")
-    print(last_review.summary)
+        if last_review.acceptable:
+            print("\n== accepted ==")
+        else:
+            print("\n== review found blockers ==")
+        print(last_review.summary)
 
-    return LoopyResult(
-        accepted=last_review.acceptable,
-        run=run,
-        iterations=iteration,
-        last_review=last_review,
-    )
+        return LoopyResult(
+            accepted=last_review.acceptable,
+            run=run,
+            iterations=iteration,
+            last_review=last_review,
+        )
 
 
-def _run_context(*, config: RunConfig, run: RunPaths, adapter: AgentAdapter) -> str:
+def _run_context(
+    *,
+    config: RunConfig,
+    run: RunPaths,
+    adapter: AgentAdapter,
+    artifact_root: Path,
+) -> str:
     prompt = PromptFile(path=Path("built-in-context.md"), text=CONTEXT_PROMPT)
     iteration_goal = "Gather reusable read-only project context before implementation begins."
     if isinstance(config, ReviewOnlyConfig):
@@ -314,7 +360,11 @@ def _run_context(*, config: RunConfig, run: RunPaths, adapter: AgentAdapter) -> 
         iteration=0,
         role="context",
     )
-    (run.root / "context.prompt.xml").write_text(context_input, encoding="utf-8")
+    if _preserve_debug_artifacts(config):
+        (artifact_root / "context.prompt.xml").write_text(
+            context_input,
+            encoding="utf-8",
+        )
 
     result = adapter.run(
         AgentCall(
@@ -323,8 +373,8 @@ def _run_context(*, config: RunConfig, run: RunPaths, adapter: AgentAdapter) -> 
             prompt=context_input,
             target=config.target,
             output_path=run.context,
-            stream_log_path=run.root / "context.stream.log",
-            metadata_path=run.root / "context.metadata.json",
+            stream_log_path=artifact_root / "context.stream.log",
+            metadata_path=artifact_root / "context.metadata.json",
             readonly=True,
         )
     )
@@ -337,6 +387,7 @@ def _run_prompt_sequence(
     config: RunConfig,
     run: RunPaths,
     adapter: AgentAdapter,
+    artifact_root: Path,
     prompts: list[PromptFile],
     project_context: str,
     previous_review: str | None,
@@ -349,7 +400,7 @@ def _run_prompt_sequence(
     schema_path: Path | None = None,
     parse_reviews: bool = False,
 ) -> list[ReviewResult] | list[str] | None:
-    iteration_dir = run.iteration_dir(iteration)
+    artifact_iteration_dir = artifact_root / f"iter-{iteration:03d}"
     results: list[ReviewResult] = []
     outputs: list[str] = []
 
@@ -372,9 +423,11 @@ def _run_prompt_sequence(
             iteration=iteration,
             role=role,
         )
-        prompt_path = iteration_dir / f"{call_stem}.prompt.xml"
-        output_path = iteration_dir / f"{call_stem}.output.md"
-        prompt_path.write_text(rendered, encoding="utf-8")
+        prompt_path = artifact_iteration_dir / f"{call_stem}.prompt.xml"
+        output_path = artifact_iteration_dir / f"{call_stem}.output.md"
+        if _preserve_debug_artifacts(config):
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(rendered, encoding="utf-8")
 
         print(f"\n-- {role} {index}/{len(prompts)}: {prompt.name} --")
         result = adapter.run(
@@ -384,8 +437,8 @@ def _run_prompt_sequence(
                 prompt=rendered,
                 target=config.target,
                 output_path=output_path,
-                stream_log_path=iteration_dir / f"{call_stem}.stream.log",
-                metadata_path=iteration_dir / f"{call_stem}.metadata.json",
+                stream_log_path=artifact_iteration_dir / f"{call_stem}.stream.log",
+                metadata_path=artifact_iteration_dir / f"{call_stem}.metadata.json",
                 readonly=readonly,
                 schema_path=schema_path if role in {"evaluator", "reviewer"} else None,
             )
@@ -394,10 +447,11 @@ def _run_prompt_sequence(
 
         if parse_reviews:
             review = _parse_review_result(result.output_text)
-            _write_json(
-                iteration_dir / f"{call_stem}.review.json",
-                review.model_dump(mode="json"),
-            )
+            if _preserve_debug_artifacts(config):
+                _write_json(
+                    artifact_iteration_dir / f"{call_stem}.review.json",
+                    review.model_dump(mode="json"),
+                )
             results.append(review)
         else:
             outputs.append(result.output_text)
@@ -444,8 +498,9 @@ def _merge_review_results(results: list[ReviewResult]) -> ReviewResult:
     )
 
 
-def _write_review_schema(run: RunPaths) -> Path:
-    schema_path = run.root / "review.schema.json"
+def _write_review_schema(artifact_root: Path) -> Path:
+    schema_path = artifact_root / "review.schema.json"
+    schema_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(schema_path, _strict_json_schema(ReviewResult.model_json_schema()))
     return schema_path
 

@@ -37,7 +37,11 @@ Do not guess at APIs that can be read from the project.
 
 - Keep the change scoped to the original task and latest review feedback.
 - Follow nearby patterns exactly unless the task genuinely requires a different approach.
+- Keep the implementation cohesive with the surrounding system; new code should feel native beside
+  the files, APIs, and workflows it touches.
 - Prefer extending the existing design over introducing new abstractions.
+- Look for duplicative code introduced by the change and pragmatic opportunities to consolidate
+  without abstracting for its own sake.
 - Use explicit names that fit the surrounding code.
 - Remove or update replaced code, stale imports, dead references, and obsolete paths.
 - Avoid AI-looking slop: ornamental comments, abnormal defensive wrappers, redundant variables,

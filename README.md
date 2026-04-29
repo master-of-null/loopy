@@ -172,9 +172,39 @@ loopy review --diff-scope all
 Pass `--task` or `--task-file` with `loopy review` when you want the reviewer to judge the diff
 against specific acceptance criteria.
 
+Loopy keeps compact run artifacts by default. Use `--artifact-mode debug` or
+`--artifact-mode full` when you need the full per-call prompts, raw outputs, stream logs, metadata,
+schema files, and parsed review JSON:
+
+```bash
+loopy --artifact-mode debug --engine codex --task-file task.md
+```
+
+Press `Ctrl+C` to stop a run. Loopy will terminate the active child agent process group before
+exiting.
+
 ## Run Artifacts
 
-Every run is saved under `runs/`, which is gitignored:
+Every run is saved under `runs/`, which is gitignored. The default `essential` artifact mode keeps
+only the files needed to understand and continue the run:
+
+```text
+runs/
+  20260429-093100-add-health-check-endpoint/
+    task.md
+    context.md
+    iter-001/
+      implementation-reports.md
+      evaluation.merged.json
+      review.merged.json
+```
+
+Review-only runs skip evaluation and keep the scoped diff in
+`iter-001/implementation-reports.md`; they do not save a separate `review-target.patch` unless debug
+artifacts are enabled.
+
+With `--artifact-mode debug` or `--artifact-mode full`, Loopy preserves the full process artifacts
+used during each agent call:
 
 ```text
 runs/
@@ -183,24 +213,29 @@ runs/
     context.md
     context.prompt.xml
     context.stream.log
+    context.metadata.json
     review.schema.json
     iter-001/
-      implementer-001-implement.prompt.xml
-      implementer-001-implement.output.md
-      implementer-001-implement.stream.log
+      implementer-001-001-implement.prompt.xml
+      implementer-001-001-implement.output.md
+      implementer-001-001-implement.stream.log
+      implementer-001-001-implement.metadata.json
       implementation-reports.md
-      evaluator-001-evaluate.prompt.xml
-      evaluator-001-evaluate.output.md
-      evaluator-001-evaluate.review.json
+      evaluator-001-001-evaluate.prompt.xml
+      evaluator-001-001-evaluate.output.md
+      evaluator-001-001-evaluate.stream.log
+      evaluator-001-001-evaluate.metadata.json
+      evaluator-001-001-evaluate.review.json
       evaluation.merged.json
-      reviewer-001-review.prompt.xml
-      reviewer-001-review.output.md
-      reviewer-001-review.review.json
+      reviewer-001-001-review.prompt.xml
+      reviewer-001-001-review.output.md
+      reviewer-001-001-review.stream.log
+      reviewer-001-001-review.metadata.json
+      reviewer-001-001-review.review.json
       review.merged.json
 ```
 
-Review-only runs also save `review-target.patch` at the run root and copy that scoped diff into
-`iter-001/implementation-reports.md` for the reviewer prompt.
+In debug/full mode, review-only runs also save `review-target.patch` at the run root.
 
 ## Claude
 

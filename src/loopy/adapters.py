@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 
@@ -85,6 +86,7 @@ def _run_streaming(
     cwd: Path | None,
     stream_log_path: Path,
 ) -> tuple[int, str]:
+    popen_kwargs = _process_group_kwargs()
     process = subprocess.Popen(
         command,
         cwd=str(cwd) if cwd else None,
@@ -93,23 +95,79 @@ def _run_streaming(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        **popen_kwargs,
     )
 
-    assert process.stdin is not None
-    process.stdin.write(prompt)
-    process.stdin.close()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
 
-    chunks: list[str] = []
-    assert process.stdout is not None
-    with stream_log_path.open("w", encoding="utf-8") as log_file:
-        for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            log_file.write(line)
-            chunks.append(line)
+    def handle_sigterm(signum: int, _frame: object) -> None:
+        _terminate_process_group(process)
+        raise SystemExit(128 + signum)
 
-    returncode = process.wait()
-    return returncode, "".join(chunks)
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    try:
+        assert process.stdin is not None
+        process.stdin.write(prompt)
+        process.stdin.close()
+
+        chunks: list[str] = []
+        assert process.stdout is not None
+        with stream_log_path.open("w", encoding="utf-8") as log_file:
+            for line in process.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log_file.write(line)
+                chunks.append(line)
+
+        returncode = process.wait()
+        return returncode, "".join(chunks)
+    except BaseException:
+        _terminate_process_group(process)
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def _process_group_kwargs() -> dict[str, object]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if creationflags:
+        return {"creationflags": creationflags}
+    return {}
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+
+    _send_process_signal(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process)
+        process.wait()
+
+
+def _send_process_signal(process: subprocess.Popen[str], sig: signal.Signals) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, sig)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+
+
+def _kill_process_group(process: subprocess.Popen[str]) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
 
 
 def _read_output(path: Path, *, fallback: str) -> str:
