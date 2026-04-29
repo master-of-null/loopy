@@ -8,6 +8,7 @@ packs:
 ```text
 prompts/
   implementer/
+  post-hooks/
   evaluator/
   reviewer/
 ```
@@ -15,13 +16,17 @@ prompts/
 Each markdown file in a role directory becomes one agent call. Add, remove, split, reorder, or tune
 those prompt files to change how Loopy develops code.
 
+For agents working on Loopy itself, `AGENTS.md` is the short map and `docs/ARCHITECTURE.md` is the
+slightly deeper lifecycle/module reference.
+
 ## The Loop
 
 Loopy runs this loop until the reviewer accepts the work or `--max-iters` is reached:
 
 ```mermaid
 flowchart LR
-    A["Implementer prompts<br/>write code"] --> B["Evaluator prompts<br/>read-only validation"]
+    A["Implementer prompts<br/>write code"] --> H["Post-hook prompts<br/>follow-up edits"]
+    H --> B["Evaluator prompts<br/>read-only validation"]
     B --> C{"validation acceptable?"}
     C -- "yes" --> D["Reviewer prompts<br/>read-only production review"]
     C -- "no" --> F["Feedback<br/>blockers + next instructions"]
@@ -32,7 +37,7 @@ flowchart LR
 ```
 
 Before the loop starts, Loopy makes one read-only context call against the target project. That shared
-project context is injected into every later implementer, evaluator, and reviewer prompt.
+project context is injected into every later implementer, post-hook, evaluator, and reviewer prompt.
 
 ## Prompt Payload
 
@@ -83,6 +88,13 @@ practical. On later passes it should focus on the previous evaluator or reviewer
 preserving the original task intent. The default prompt favors TDD when applicable, codebase
 conventions, simple design, and concrete validation.
 
+Post-hook prompts live in `prompts/post-hooks/`.
+
+Post-hooks run after implementation and before evaluator validation. They are write-capable follow-up
+callbacks for work that should happen after code changes, starting with target-project doc gardening.
+The default post-hook inspects relevant project docs and updates them when the implementation made
+them stale, incomplete, or misleading.
+
 Evaluator prompts live in `prompts/evaluator/`.
 
 The evaluator is read-only. It inspects the change, decides what tests/checks are relevant, runs
@@ -97,8 +109,8 @@ surrounding system, conventions, simplicity, pragmatic factoring, duplication, d
 repo-grounded assumptions. Reviewer reports decide whether the loop stops.
 
 By default, Loopy uses the prompt folders from this checkout, even when you run `loopy` from another
-project directory. Use `--implementer-dir`, `--evaluator-dir`, or `--reviewer-dir` to point at a
-custom prompt pack.
+project directory. Use `--implementer-dir`, `--post-hooks-dir`, `--evaluator-dir`, or
+`--reviewer-dir` to point at a custom prompt pack.
 
 ## Output Contract
 
@@ -126,8 +138,8 @@ Loopy enforces this in two ways:
 - For Claude, evaluator and reviewer calls include `claude -p --json-schema <schema-json>`.
 - After the CLI returns, Loopy validates the final output with Pydantic.
 
-Context and implementer calls do not use the structured output contract. Their outputs are saved as
-plain text reports and fed into later phases as context.
+Context, implementer, and post-hook calls do not use the structured output contract. Implementer and
+post-hook outputs are saved as plain text reports and fed into later phases as context.
 
 ## Usage
 
@@ -172,6 +184,16 @@ loopy review --diff-scope all
 Pass `--task` or `--task-file` with `loopy review` when you want the reviewer to judge the diff
 against specific acceptance criteria.
 
+To run only the target-project doc gardening post-hooks, use:
+
+```bash
+loopy docs --engine codex
+```
+
+Doc gardening is write-capable. It inspects the target project's relevant docs and code, then updates
+docs that are stale, incomplete, misleading, or missing important project guidance. Pass `--task` or
+`--task-file` to focus the pass.
+
 Loopy keeps compact run artifacts by default. Use `--artifact-mode debug` or
 `--artifact-mode full` when you need the full per-call prompts, raw outputs, stream logs, metadata,
 schema files, and parsed review JSON:
@@ -193,15 +215,25 @@ runs/
   20260429-093100-add-health-check-endpoint/
     task.md
     context.md
+    run.summary.json
+    run.summary.md
     iter-001/
+      implementer-reports.md
+      post-hook-reports.md
       implementation-reports.md
       evaluation.merged.json
       review.merged.json
 ```
 
-Review-only runs skip evaluation and keep the scoped diff in
+`implementation-reports.md` combines the implementer and post-hook reports that were fed to
+evaluator and reviewer prompts. Review-only runs skip implementation, post-hooks, and evaluation, and
+keep the scoped diff in
 `iter-001/implementation-reports.md`; they do not save a separate `review-target.patch` unless debug
-artifacts are enabled.
+artifacts are enabled. Doc-gardening runs skip implementation, evaluation, and review, and save the
+post-hook report in `iter-001/post-hook-reports.md`.
+
+`run.summary.json` and `run.summary.md` provide compact top-level summaries of the mode, task,
+configuration, status, iterations, review findings, and key artifact paths.
 
 With `--artifact-mode debug` or `--artifact-mode full`, Loopy preserves the full process artifacts
 used during each agent call:
@@ -211,6 +243,8 @@ runs/
   20260429-093100-add-health-check-endpoint/
     task.md
     context.md
+    run.summary.json
+    run.summary.md
     context.prompt.xml
     context.stream.log
     context.metadata.json
@@ -220,6 +254,12 @@ runs/
       implementer-001-001-implement.output.md
       implementer-001-001-implement.stream.log
       implementer-001-001-implement.metadata.json
+      implementer-reports.md
+      post-hook-001-001-doc-gardening.prompt.xml
+      post-hook-001-001-doc-gardening.output.md
+      post-hook-001-001-doc-gardening.stream.log
+      post-hook-001-001-doc-gardening.metadata.json
+      post-hook-reports.md
       implementation-reports.md
       evaluator-001-001-evaluate.prompt.xml
       evaluator-001-001-evaluate.output.md

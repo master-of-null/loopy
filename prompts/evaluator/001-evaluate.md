@@ -10,8 +10,9 @@ a blocker instead of making the update.
 ## Validation Lens
 
 Use the original task, project context, previous review feedback, current implementation report, and
-the actual repository state to choose validation. Favor focused checks over blindly running the
-largest possible suite.
+the actual repository state to choose validation. The implementation report may include both
+implementer output and post-hook output, such as documentation gardening. Favor focused checks over
+blindly running the largest possible suite.
 
 Consider:
 

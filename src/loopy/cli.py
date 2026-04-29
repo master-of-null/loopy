@@ -4,7 +4,14 @@ from argparse import ArgumentParser, SUPPRESS
 from pathlib import Path
 import sys
 
-from loopy.runner import LoopyConfig, ReviewOnlyConfig, run_loopy, run_review_only
+from loopy.runner import (
+    DocGardeningConfig,
+    LoopyConfig,
+    ReviewOnlyConfig,
+    run_doc_gardening,
+    run_loopy,
+    run_review_only,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,6 +37,17 @@ def main(argv: list[str] | None = None) -> int:
                 artifact_mode=args.artifact_mode,
             )
             result = run_review_only(config)
+        elif args.command == "docs":
+            original_task = _load_task(args, required=False) or _default_docs_task()
+            config = DocGardeningConfig(
+                engine=args.engine,
+                target=target,
+                original_task=original_task,
+                runs_dir=args.runs_dir.resolve(),
+                post_hooks_dir=_resolve_prompt_dir(args.post_hooks_dir, "post-hooks"),
+                artifact_mode=args.artifact_mode,
+            )
+            result = run_doc_gardening(config)
         else:
             original_task = _load_task(args, required=True)
             config = LoopyConfig(
@@ -38,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
                 original_task=original_task,
                 runs_dir=args.runs_dir.resolve(),
                 implementer_dir=_resolve_prompt_dir(args.implementer_dir, "implementer"),
+                post_hooks_dir=_resolve_prompt_dir(args.post_hooks_dir, "post-hooks"),
                 evaluator_dir=_resolve_prompt_dir(args.evaluator_dir, "evaluator"),
                 reviewer_dir=_resolve_prompt_dir(args.reviewer_dir, "reviewer"),
                 max_iters=args.max_iters,
@@ -59,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
         print("review reported blockers")
         return 1
 
+    if args.command == "docs":
+        print("doc gardening did not complete")
+        return 1
+
     print(f"stopped after {result.iterations} iteration(s) without acceptance")
     return 1
 
@@ -75,6 +98,11 @@ def _build_parser() -> ArgumentParser:
         "--evaluator-dir",
         type=Path,
         help="Directory of markdown prompts run for agentic validation.",
+    )
+    parser.add_argument(
+        "--post-hooks-dir",
+        type=Path,
+        help="Directory of markdown prompts run after implementation.",
     )
     parser.add_argument(
         "--max-iters",
@@ -94,6 +122,18 @@ def _build_parser() -> ArgumentParser:
         choices=["unstaged", "staged", "all"],
         default="unstaged",
         help="Git diff scope to review. Defaults to unstaged changes.",
+    )
+    docs_parser = subparsers.add_parser(
+        "docs",
+        help="Run post-hook doc gardening against the target project.",
+        description="Run target-project documentation gardening without an implementation pass.",
+    )
+    _add_shared_arguments(docs_parser, suppress_defaults=True)
+    docs_parser.add_argument(
+        "--post-hooks-dir",
+        type=Path,
+        default=None,
+        help="Directory of markdown prompts run for doc gardening.",
     )
     return parser
 
@@ -139,7 +179,7 @@ def _add_shared_arguments(parser: ArgumentParser, *, suppress_defaults: bool = F
         choices=["essential", "debug", "full"],
         default=_default("essential", suppress=suppress_defaults),
         help=(
-            "Artifact capture mode. 'essential' saves only task/context and merged "
+            "Artifact capture mode. 'essential' saves task/context, summaries, and merged "
             "reports; 'debug'/'full' preserves per-call prompts, outputs, logs, "
             "metadata, schemas, and parsed reviews."
         ),
@@ -171,6 +211,13 @@ def _default_review_task(diff_scope: str) -> str:
     return (
         f"Review the current {diff_scope} code changes for correctness, regressions, "
         "missing validation, and production-readiness issues."
+    )
+
+
+def _default_docs_task() -> str:
+    return (
+        "Garden the target project's documentation. Inspect relevant docs and code, then update "
+        "docs that are stale, incomplete, misleading, or missing important project guidance."
     )
 
 

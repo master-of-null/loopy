@@ -58,8 +58,9 @@ After editing:
 - If validation fails, fix the issue before finishing when practical.
 - If validation cannot be run or a failure cannot be fixed, state that clearly.
 
-An evaluator agent will independently choose and run relevant validation after you finish. Your job
-is still to leave the project in a state that should pass that validation.
+A post-hook agent may make focused follow-up edits after you finish, especially to keep target
+project docs current. An evaluator agent will independently choose and run relevant validation after
+that. Your job is still to leave the project in a state that should pass validation.
 
 ## Final Response
 

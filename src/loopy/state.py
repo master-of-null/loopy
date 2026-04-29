@@ -18,6 +18,14 @@ class RunPaths:
     def task(self) -> Path:
         return self.root / "task.md"
 
+    @property
+    def summary_json(self) -> Path:
+        return self.root / "run.summary.json"
+
+    @property
+    def summary_md(self) -> Path:
+        return self.root / "run.summary.md"
+
     def iteration_dir(self, iteration: int) -> Path:
         return self.root / f"iter-{iteration:03d}"
 

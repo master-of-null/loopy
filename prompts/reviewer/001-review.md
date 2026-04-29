@@ -33,9 +33,9 @@ Look for:
 Use `<iteration_goal>` to understand whether this is the initial implementation pass or a follow-up
 pass after earlier review feedback.
 
-Use `<current_iteration_implementation_reports>` to understand what the implementer claims changed,
-what validation it claims to have run, and what it intentionally deferred. Treat those reports as
-context, not proof. Verify the current repository state directly.
+Use `<current_iteration_implementation_reports>` to understand what the implementer and post-hooks
+claim changed, what validation they claim to have run, and what they intentionally deferred. Treat
+those reports as context, not proof. Verify the current repository state directly.
 
 If `<current_iteration_implementation_reports>` says Loopy is running in review-only mode, use that
 report as the authoritative review scope. Inspect files as needed to understand the change, but do
