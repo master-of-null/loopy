@@ -125,11 +125,9 @@ def _codex_command(call: AgentCall) -> list[str]:
         "--cd",
         str(call.target),
         "--skip-git-repo-check",
-        "--ask-for-approval",
-        "never",
         "--color",
         "always",
-        "-o",
+        "--output-last-message",
         str(call.output_path),
     ]
     if call.readonly:

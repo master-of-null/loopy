@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import subprocess
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -45,6 +47,8 @@ REVIEW_CONTRACT_PROMPT = """Return a final response that satisfies this JSON con
 }
 
 Use acceptable=false if any blocker remains. Return only the JSON object.
+Include every key shown. Use [] when there are no findings, and use null when optional details or
+next_instructions do not apply.
 """
 
 
@@ -66,6 +70,8 @@ EVALUATION_CONTRACT_PROMPT = """Return a final response that satisfies this JSON
 
 Use acceptable=false if relevant validation fails, cannot be run, or leaves a real unresolved risk.
 Return only the JSON object.
+Include every key shown. Use [] when there are no findings, and use null when optional details or
+next_instructions do not apply.
 """
 
 
@@ -79,6 +85,22 @@ class LoopyConfig:
     evaluator_dir: Path
     reviewer_dir: Path
     max_iters: int
+
+
+DiffScope = Literal["unstaged", "staged", "all"]
+
+
+@dataclass(frozen=True)
+class ReviewOnlyConfig:
+    engine: str
+    target: Path
+    original_task: str
+    runs_dir: Path
+    reviewer_dir: Path
+    diff_scope: DiffScope
+
+
+RunConfig = LoopyConfig | ReviewOnlyConfig
 
 
 @dataclass(frozen=True)
@@ -217,14 +239,78 @@ def run_loopy(config: LoopyConfig) -> LoopyResult:
     )
 
 
-def _run_context(*, config: LoopyConfig, run: RunPaths, adapter: AgentAdapter) -> str:
+def run_review_only(config: ReviewOnlyConfig) -> LoopyResult:
+    reviewer_prompts = load_prompt_files(config.reviewer_dir)
+    review_target = _collect_review_target(config.target, config.diff_scope)
+
+    run = create_run(config.runs_dir, task_name=_task_name(config.original_task))
+    run.task.write_text(config.original_task, encoding="utf-8")
+
+    adapter = AgentAdapter()
+    schema_path = _write_review_schema(run)
+    (run.root / "review-target.patch").write_text(review_target, encoding="utf-8")
+
+    print(f"\n== loopy review-only run: {run.root} ==")
+    print("\n== context ==")
+    project_context = _run_context(config=config, run=run, adapter=adapter)
+
+    iteration = 1
+    iteration_dir = run.iteration_dir(iteration)
+    iteration_dir.mkdir(parents=True, exist_ok=True)
+    (iteration_dir / "implementation-reports.md").write_text(
+        review_target,
+        encoding="utf-8",
+    )
+
+    print(f"\n== review-only ({config.diff_scope}) ==")
+    review_results = _run_prompt_sequence(
+        config=config,
+        run=run,
+        adapter=adapter,
+        prompts=reviewer_prompts,
+        project_context=project_context,
+        previous_review=None,
+        implementation_reports=review_target,
+        evaluation_reports=None,
+        iteration_goal=_review_only_goal(config.diff_scope),
+        iteration=iteration,
+        role="reviewer",
+        readonly=True,
+        schema_path=schema_path,
+        parse_reviews=True,
+    )
+    assert review_results is not None
+    last_review = _merge_review_results(review_results)
+    _write_json(
+        iteration_dir / "review.merged.json",
+        last_review.model_dump(mode="json"),
+    )
+
+    if last_review.acceptable:
+        print("\n== accepted ==")
+    else:
+        print("\n== review found blockers ==")
+    print(last_review.summary)
+
+    return LoopyResult(
+        accepted=last_review.acceptable,
+        run=run,
+        iterations=iteration,
+        last_review=last_review,
+    )
+
+
+def _run_context(*, config: RunConfig, run: RunPaths, adapter: AgentAdapter) -> str:
     prompt = PromptFile(path=Path("built-in-context.md"), text=CONTEXT_PROMPT)
+    iteration_goal = "Gather reusable read-only project context before implementation begins."
+    if isinstance(config, ReviewOnlyConfig):
+        iteration_goal = "Gather reusable read-only project context before review begins."
     context_input = render_agent_input(
         original_task=config.original_task,
         project_context="No project context has been gathered yet.",
         prompt=prompt,
         previous_review=None,
-        iteration_goal="Gather reusable read-only project context before implementation begins.",
+        iteration_goal=iteration_goal,
         iteration=0,
         role="context",
     )
@@ -248,7 +334,7 @@ def _run_context(*, config: LoopyConfig, run: RunPaths, adapter: AgentAdapter) -
 
 def _run_prompt_sequence(
     *,
-    config: LoopyConfig,
+    config: RunConfig,
     run: RunPaths,
     adapter: AgentAdapter,
     prompts: list[PromptFile],
@@ -360,8 +446,26 @@ def _merge_review_results(results: list[ReviewResult]) -> ReviewResult:
 
 def _write_review_schema(run: RunPaths) -> Path:
     schema_path = run.root / "review.schema.json"
-    _write_json(schema_path, ReviewResult.model_json_schema())
+    _write_json(schema_path, _strict_json_schema(ReviewResult.model_json_schema()))
     return schema_path
+
+
+def _strict_json_schema(value: object) -> object:
+    if isinstance(value, dict):
+        cleaned = {
+            key: _strict_json_schema(item)
+            for key, item in value.items()
+            if key != "default"
+        }
+        properties = cleaned.get("properties")
+        if isinstance(properties, dict):
+            cleaned["required"] = list(properties)
+        return cleaned
+
+    if isinstance(value, list):
+        return [_strict_json_schema(item) for item in value]
+
+    return value
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -400,3 +504,125 @@ def _format_implementation_reports(
     for prompt, output in zip(prompts, outputs, strict=True):
         sections.append(f"## {prompt.name}\n\n{output.strip()}")
     return "\n\n".join(sections)
+
+
+def _review_only_goal(diff_scope: DiffScope) -> str:
+    return (
+        "Review-only pass. No implementer or evaluator has run. Review only the "
+        f"{diff_scope} changes captured in the implementation report and ignore unrelated "
+        "repository state."
+    )
+
+
+def _collect_review_target(target: Path, diff_scope: DiffScope) -> str:
+    sections = [
+        "# Review-Only Target",
+        "",
+        "Loopy is running in review-only mode. No implementer has modified files in this run.",
+        f"Diff scope: `{diff_scope}`.",
+        "",
+        "Review only the changes represented below. Treat unrelated repository state as out of scope.",
+    ]
+
+    diff_sections: list[str] = []
+    if diff_scope == "unstaged":
+        diff_sections.append(
+            _format_diff_section("Unstaged tracked changes", _git_diff(target))
+        )
+        diff_sections.append(_format_untracked_section(target))
+    elif diff_scope == "staged":
+        diff_sections.append(
+            _format_diff_section("Staged changes", _git_diff(target, "--cached"))
+        )
+    elif diff_scope == "all":
+        diff_sections.append(
+            _format_diff_section(
+                "Tracked changes against HEAD",
+                _git_diff(target, "HEAD"),
+            )
+        )
+        diff_sections.append(_format_untracked_section(target))
+    else:
+        raise ValueError(f"Unsupported diff scope: {diff_scope}")
+
+    diff_text = "\n\n".join(section for section in diff_sections if section.strip())
+    if not diff_text.strip():
+        raise ValueError(f"No {diff_scope} changes found to review.")
+
+    return "\n".join(sections).rstrip() + "\n\n" + diff_text.rstrip() + "\n"
+
+
+def _format_diff_section(title: str, diff_text: str) -> str:
+    if not diff_text.strip():
+        return ""
+    return f"## {title}\n\n```diff\n{diff_text.rstrip()}\n```"
+
+
+def _format_untracked_section(target: Path) -> str:
+    paths = _git_lines(
+        target,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--",
+        ".",
+    )
+    if not paths:
+        return ""
+
+    sections = ["## Untracked files"]
+    for path in paths:
+        diff_text = _git_diff_no_index(target, "/dev/null", path)
+        sections.append(f"### {path}\n\n```diff\n{diff_text.rstrip()}\n```")
+    return "\n\n".join(sections)
+
+
+def _git_diff(target: Path, *extra_args: str) -> str:
+    return _git(
+        target,
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--relative",
+        *extra_args,
+        "--",
+        ".",
+    )
+
+
+def _git_diff_no_index(target: Path, before: str, after: str) -> str:
+    return _git(
+        target,
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--",
+        before,
+        after,
+        allowed_returncodes={0, 1},
+    )
+
+
+def _git_lines(target: Path, *args: str) -> list[str]:
+    output = _git(target, *args)
+    return [line for line in output.splitlines() if line]
+
+
+def _git(
+    target: Path,
+    *args: str,
+    allowed_returncodes: set[int] | None = None,
+) -> str:
+    allowed = allowed_returncodes or {0}
+    command = ["git", "-C", str(target), *args]
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode not in allowed:
+        detail = result.stderr.strip() or result.stdout.strip()
+        command_text = " ".join(command)
+        raise RuntimeError(f"`{command_text}` failed: {detail}")
+    return result.stdout

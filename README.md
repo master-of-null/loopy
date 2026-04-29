@@ -154,6 +154,24 @@ You can also pass a short task inline:
 loopy --engine codex --task "Add a health check endpoint."
 ```
 
+To run only a read-only review of your current unstaged changes, use:
+
+```bash
+loopy review --engine codex
+```
+
+Review-only mode skips implementation and evaluation, captures the requested git diff, and runs the
+reviewer once. By default it reviews unstaged tracked changes plus untracked files. You can also
+review staged changes or all current changes:
+
+```bash
+loopy review --diff-scope staged
+loopy review --diff-scope all
+```
+
+Pass `--task` or `--task-file` with `loopy review` when you want the reviewer to judge the diff
+against specific acceptance criteria.
+
 ## Run Artifacts
 
 Every run is saved under `runs/`, which is gitignored:
@@ -180,6 +198,9 @@ runs/
       reviewer-001-review.review.json
       review.merged.json
 ```
+
+Review-only runs also save `review-target.patch` at the run root and copy that scoped diff into
+`iter-001/implementation-reports.md` for the reviewer prompt.
 
 ## Claude
 

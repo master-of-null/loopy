@@ -37,6 +37,10 @@ Use `<current_iteration_implementation_reports>` to understand what the implemen
 what validation it claims to have run, and what it intentionally deferred. Treat those reports as
 context, not proof. Verify the current repository state directly.
 
+If `<current_iteration_implementation_reports>` says Loopy is running in review-only mode, use that
+report as the authoritative review scope. Inspect files as needed to understand the change, but do
+not raise findings for unrelated repository state outside the captured diff scope.
+
 Use `<current_iteration_evaluation_reports>` to see what the evaluator checked before review. If the
 evaluator found blocker validation failures, this reviewer should normally not have been called.
 
