@@ -23,13 +23,12 @@ Loopy runs this loop until the reviewer accepts the work or `--max-iters` is rea
 flowchart LR
     A["Implementer prompts<br/>write code"] --> B["Evaluator prompts<br/>read-only validation"]
     B --> C{"validation acceptable?"}
-    C -- "no" --> D["feed evaluator feedback<br/>to next implementer pass"]
-    D --> A
-    C -- "yes" --> E["Reviewer prompts<br/>read-only production review"]
-    E --> F{"review acceptable?"}
-    F -- "no" --> G["feed review feedback<br/>to next implementer pass"]
-    G --> A
-    F -- "yes" --> H["accepted"]
+    C -- "yes" --> D["Reviewer prompts<br/>read-only production review"]
+    C -- "no" --> F["Feedback<br/>blockers + next instructions"]
+    D --> E{"review acceptable?"}
+    E -- "no" --> F
+    E -- "yes" --> G["accepted"]
+    F --> A
 ```
 
 Before the loop starts, Loopy makes one read-only context call against the target project. That shared
