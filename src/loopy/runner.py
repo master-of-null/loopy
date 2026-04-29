@@ -48,6 +48,27 @@ Use acceptable=false if any blocker remains. Return only the JSON object.
 """
 
 
+EVALUATION_CONTRACT_PROMPT = """Return a final response that satisfies this JSON contract:
+
+{
+  "acceptable": true,
+  "summary": "Short validation summary, including what you ran or why you did not run it.",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "What validation failed or what must be fixed before review.",
+      "details": "Optional details, including command output summaries.",
+      "files": ["optional/path.py"]
+    }
+  ],
+  "next_instructions": "Optional instructions for the next implementer pass."
+}
+
+Use acceptable=false if relevant validation fails, cannot be run, or leaves a real unresolved risk.
+Return only the JSON object.
+"""
+
+
 @dataclass(frozen=True)
 class LoopyConfig:
     engine: str
@@ -55,6 +76,7 @@ class LoopyConfig:
     original_task: str
     runs_dir: Path
     implementer_dir: Path
+    evaluator_dir: Path
     reviewer_dir: Path
     max_iters: int
 
@@ -69,6 +91,7 @@ class LoopyResult:
 
 def run_loopy(config: LoopyConfig) -> LoopyResult:
     implementer_prompts = load_prompt_files(config.implementer_dir)
+    evaluator_prompts = load_prompt_files(config.evaluator_dir)
     reviewer_prompts = load_prompt_files(config.reviewer_dir)
 
     run = create_run(config.runs_dir, task_name=_task_name(config.original_task))
@@ -98,6 +121,7 @@ def run_loopy(config: LoopyConfig) -> LoopyResult:
             project_context=project_context,
             previous_review=previous_review,
             implementation_reports=None,
+            evaluation_reports=None,
             iteration_goal=iteration_goal,
             iteration=iteration,
             role="implementer",
@@ -113,6 +137,40 @@ def run_loopy(config: LoopyConfig) -> LoopyResult:
             encoding="utf-8",
         )
 
+        evaluation_results = _run_prompt_sequence(
+            config=config,
+            run=run,
+            adapter=adapter,
+            prompts=evaluator_prompts,
+            project_context=project_context,
+            previous_review=previous_review,
+            implementation_reports=implementation_reports,
+            evaluation_reports=None,
+            iteration_goal=iteration_goal,
+            iteration=iteration,
+            role="evaluator",
+            readonly=True,
+            schema_path=schema_path,
+            parse_reviews=True,
+        )
+        assert evaluation_results is not None
+        evaluation_review = _merge_review_results(evaluation_results)
+        evaluation_report = evaluation_review.model_dump_json(indent=2)
+        (iteration_dir / "evaluation.merged.json").write_text(
+            evaluation_report,
+            encoding="utf-8",
+        )
+
+        if not evaluation_review.acceptable:
+            print("\n== evaluation failed; skipping reviewer ==")
+            last_review = evaluation_review
+            _write_json(
+                iteration_dir / "review.merged.json",
+                last_review.model_dump(mode="json"),
+            )
+            previous_review = last_review.model_dump_json(indent=2)
+            continue
+
         review_results = _run_prompt_sequence(
             config=config,
             run=run,
@@ -121,6 +179,7 @@ def run_loopy(config: LoopyConfig) -> LoopyResult:
             project_context=project_context,
             previous_review=previous_review,
             implementation_reports=implementation_reports,
+            evaluation_reports=evaluation_report,
             iteration_goal=iteration_goal,
             iteration=iteration,
             role="reviewer",
@@ -196,6 +255,7 @@ def _run_prompt_sequence(
     project_context: str,
     previous_review: str | None,
     implementation_reports: str | None,
+    evaluation_reports: str | None,
     iteration_goal: str,
     iteration: int,
     role: str,
@@ -212,6 +272,8 @@ def _run_prompt_sequence(
         prompt_text = prompt.text
         if role == "reviewer":
             prompt_text = f"{prompt_text.rstrip()}\n\n{REVIEW_CONTRACT_PROMPT}"
+        if role == "evaluator":
+            prompt_text = f"{prompt_text.rstrip()}\n\n{EVALUATION_CONTRACT_PROMPT}"
 
         rendered = render_agent_input(
             original_task=config.original_task,
@@ -219,6 +281,7 @@ def _run_prompt_sequence(
             prompt=PromptFile(path=prompt.path, text=prompt_text),
             previous_review=previous_review,
             implementation_reports=implementation_reports,
+            evaluation_reports=evaluation_reports,
             iteration_goal=iteration_goal,
             iteration=iteration,
             role=role,
@@ -238,7 +301,7 @@ def _run_prompt_sequence(
                 stream_log_path=iteration_dir / f"{call_stem}.stream.log",
                 metadata_path=iteration_dir / f"{call_stem}.metadata.json",
                 readonly=readonly,
-                schema_path=schema_path if role == "reviewer" else None,
+                schema_path=schema_path if role in {"evaluator", "reviewer"} else None,
             )
         )
         _raise_on_agent_failure(f"{role} {prompt.name}", result.returncode)

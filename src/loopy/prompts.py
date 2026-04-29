@@ -35,12 +35,16 @@ def render_agent_input(
     previous_review: str | None,
     iteration_goal: str,
     implementation_reports: str | None = None,
+    evaluation_reports: str | None = None,
     iteration: int,
     role: str,
 ) -> str:
     previous_review_text = previous_review or "No previous review feedback."
     implementation_report_text = (
         implementation_reports or "No implementation reports have been produced for this call."
+    )
+    evaluation_report_text = (
+        evaluation_reports or "No evaluation reports have been produced for this call."
     )
 
     return f"""<loopy_run>
@@ -66,6 +70,10 @@ def render_agent_input(
 <current_iteration_implementation_reports>
 {implementation_report_text}
 </current_iteration_implementation_reports>
+
+<current_iteration_evaluation_reports>
+{evaluation_report_text}
+</current_iteration_evaluation_reports>
 
 <prompt_file name="{prompt.name}">
 {prompt.text}

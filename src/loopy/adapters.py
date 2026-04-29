@@ -145,11 +145,11 @@ def _codex_command(call: AgentCall) -> list[str]:
 def _claude_command(call: AgentCall) -> list[str]:
     readonly_configured = os.environ.get("LOOPY_CLAUDE_READONLY_COMMAND")
     if call.readonly and readonly_configured:
-        return shlex.split(readonly_configured)
+        return _append_claude_schema(shlex.split(readonly_configured), call)
 
     configured = os.environ.get("LOOPY_CLAUDE_COMMAND")
     if configured:
-        return shlex.split(configured)
+        return _append_claude_schema(shlex.split(configured), call)
 
     command = ["claude", "-p"]
     if call.readonly:
@@ -164,4 +164,12 @@ def _claude_command(call: AgentCall) -> list[str]:
                 "NotebookEdit",
             ]
         )
-    return command
+    return _append_claude_schema(command, call)
+
+
+def _append_claude_schema(command: list[str], call: AgentCall) -> list[str]:
+    if not call.schema_path:
+        return command
+
+    schema = json.dumps(json.loads(call.schema_path.read_text(encoding="utf-8")))
+    return [*command, "--json-schema", schema]

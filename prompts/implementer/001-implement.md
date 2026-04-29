@@ -12,6 +12,13 @@ Use `<iteration_goal>` to understand the pass you are in:
 The codebase is the source of truth. Read before you write, match what exists, and verify what you
 produce.
 
+Prefer TDD when it is applicable to the task:
+
+- First identify the behavior that should change and the closest existing test pattern.
+- Add or update the focused failing test before implementation when the project makes that practical.
+- Implement the smallest change that makes the test pass.
+- Keep tests pragmatic and cohesive with the surrounding test style.
+
 ## Learn Before Editing
 
 Before changing files, inspect the nearest existing code to the feature or fix:
@@ -46,6 +53,9 @@ After editing:
 - Run the most relevant tests, type checks, linters, or direct commands available in the project.
 - If validation fails, fix the issue before finishing when practical.
 - If validation cannot be run or a failure cannot be fixed, state that clearly.
+
+An evaluator agent will independently choose and run relevant validation after you finish. Your job
+is still to leave the project in a state that should pass that validation.
 
 ## Final Response
 

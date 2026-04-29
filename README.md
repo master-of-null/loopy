@@ -1,57 +1,48 @@
 # Loopy
 
-Loopy is a small prompt-driven iterate/review runner for coding agents.
+Loopy is a tiny prompt-driven development loop for coding agents.
 
-The intended loop is:
-
-1. Gather one shared project context string.
-2. Run every markdown file in `prompts/implementer/`, in filename order.
-3. Run every markdown file in `prompts/reviewer/`, in filename order.
-4. Validate reviewer output with Pydantic.
-5. Stop when every reviewer result is acceptable, or fail after `--max-iters`.
-
-## Usage
-
-Install the local checkout as an editable user tool:
-
-```bash
-uv tool install --editable /Users/gabo/Workspace/loopy
-```
-
-Then run Loopy from any project directory:
-
-```bash
-loopy \
-  --engine codex \
-  --task-file task.md \
-  --max-iters 3
-```
-
-By default, `--target` is `.`, so the agents inspect and edit the directory where you run `loopy`.
-
-You can also pass a short task inline:
-
-```bash
-loopy --engine codex --task "Add a health check endpoint."
-```
-
-## Prompts
-
-Implementation prompts live in:
+The important idea is that the Python code should stay boring. The behavior lives in markdown prompt
+packs:
 
 ```text
-prompts/implementer/
+prompts/
+  implementer/
+  evaluator/
+  reviewer/
 ```
 
-Review prompts live in:
+Each markdown file in a role directory becomes one agent call. Add, remove, split, reorder, or tune
+those prompt files to change how Loopy develops code.
 
-```text
-prompts/reviewer/
+## The Loop
+
+Loopy runs this loop until the reviewer accepts the work or `--max-iters` is reached:
+
+```mermaid
+flowchart LR
+    A["Implementer prompts<br/>write code"] --> B["Evaluator prompts<br/>read-only validation"]
+    B --> C{"validation acceptable?"}
+    C -- "no" --> D["feed evaluator feedback<br/>to next implementer pass"]
+    D --> A
+    C -- "yes" --> E["Reviewer prompts<br/>read-only production review"]
+    E --> F{"review acceptable?"}
+    F -- "no" --> G["feed review feedback<br/>to next implementer pass"]
+    G --> A
+    F -- "yes" --> H["accepted"]
 ```
 
-Each markdown file is injected into the agent call with the same high-level payload:
+Before the loop starts, Loopy makes one read-only context call against the target project. That shared
+project context is injected into every later implementer, evaluator, and reviewer prompt.
+
+## Prompt Payload
+
+Every prompt file receives the same high-level payload:
 
 ```xml
+<role>reviewer</role>
+<iteration>1</iteration>
+
 <iteration_goal>
 Initial implementation pass. Build the original task as completely as practical...
 </iteration_goal>
@@ -72,25 +63,47 @@ Initial implementation pass. Build the original task as completely as practical.
 ...
 </current_iteration_implementation_reports>
 
+<current_iteration_evaluation_reports>
+...
+</current_iteration_evaluation_reports>
+
 <prompt_file name="001-review.md">
 ...
 </prompt_file>
 ```
 
-The project context prompt is built into the runner. It is gathered once at the beginning of the run
-and reused as an in-memory string for every implementer and reviewer call.
+The payload makes each call stateless and repeatable. Later calls do not depend on native CLI session
+memory; Loopy passes the task, context, reports, and previous blockers explicitly.
 
-On iteration 1, `<iteration_goal>` tells agents this is the initial implementation pass. On later
-iterations, it tells agents to focus on the previous review's blockers and next instructions while
-preserving the original task.
+## Roles
 
-Reviewer calls receive the current iteration's implementation reports. These reports are intended as
-context about what the implementer claims changed and validated; reviewers should still inspect the
-repository state directly before returning the review contract.
+Implementation prompts live in `prompts/implementer/`.
 
-## Review Contract
+The implementer writes code. On the first pass it should build the original task as completely as
+practical. On later passes it should focus on the previous evaluator or reviewer blockers while
+preserving the original task intent. The default prompt favors TDD when applicable, codebase
+conventions, simple design, and concrete validation.
 
-Reviewer calls must return JSON matching this shape:
+Evaluator prompts live in `prompts/evaluator/`.
+
+The evaluator is read-only. It inspects the change, decides what tests/checks are relevant, runs
+them, and returns structured blocker feedback if validation fails or cannot reasonably be completed.
+If evaluation fails, Loopy skips the broader reviewer for that iteration and sends the evaluator
+feedback straight to the next implementer pass.
+
+Reviewer prompts live in `prompts/reviewer/`.
+
+The reviewer is read-only. It does the production-readiness review: correctness, cohesion with the
+surrounding system, conventions, simplicity, pragmatic factoring, duplication, dead code, and
+repo-grounded assumptions. Reviewer reports decide whether the loop stops.
+
+By default, Loopy uses the prompt folders from this checkout, even when you run `loopy` from another
+project directory. Use `--implementer-dir`, `--evaluator-dir`, or `--reviewer-dir` to point at a
+custom prompt pack.
+
+## Output Contract
+
+Evaluator and reviewer calls must return JSON matching this contract:
 
 ```json
 {
@@ -108,8 +121,39 @@ Reviewer calls must return JSON matching this shape:
 }
 ```
 
-With `--engine codex`, Loopy also passes Codex a generated JSON schema through
-`codex exec --output-schema`.
+Loopy enforces this in two ways:
+
+- For Codex, evaluator and reviewer calls include `codex exec --output-schema <schema-file>`.
+- For Claude, evaluator and reviewer calls include `claude -p --json-schema <schema-json>`.
+- After the CLI returns, Loopy validates the final output with Pydantic.
+
+Context and implementer calls do not use the structured output contract. Their outputs are saved as
+plain text reports and fed into later phases as context.
+
+## Usage
+
+Install the local checkout as an editable user tool from this repository:
+
+```bash
+uv tool install --editable .
+```
+
+Then run Loopy from any project directory:
+
+```bash
+loopy \
+  --engine codex \
+  --task-file task.md \
+  --max-iters 3
+```
+
+By default, `--target` is `.`, so the agents inspect and edit the directory where you run `loopy`.
+
+You can also pass a short task inline:
+
+```bash
+loopy --engine codex --task "Add a health check endpoint."
+```
 
 ## Run Artifacts
 
@@ -128,6 +172,10 @@ runs/
       implementer-001-implement.output.md
       implementer-001-implement.stream.log
       implementation-reports.md
+      evaluator-001-evaluate.prompt.xml
+      evaluator-001-evaluate.output.md
+      evaluator-001-evaluate.review.json
+      evaluation.merged.json
       reviewer-001-review.prompt.xml
       reviewer-001-review.output.md
       reviewer-001-review.review.json
@@ -136,14 +184,14 @@ runs/
 
 ## Claude
 
-Claude support is intentionally thin until the local CLI shape is confirmed. By default Loopy runs:
+By default Loopy runs:
 
 ```bash
 claude -p
 ```
 
-For read-only calls, including context gathering and reviewers, Loopy runs Claude with plan mode and
-edit tools denied:
+For read-only calls, including context gathering, evaluators, and reviewers, Loopy runs Claude with
+plan mode and edit tools denied:
 
 ```bash
 claude -p --permission-mode plan --disallowedTools Edit MultiEdit Write NotebookEdit
@@ -152,7 +200,7 @@ claude -p --permission-mode plan --disallowedTools Edit MultiEdit Write Notebook
 You can override the Claude command with:
 
 ```bash
-LOOPY_CLAUDE_COMMAND="claude -p" uv run loopy --engine claude ...
+LOOPY_CLAUDE_COMMAND="claude -p" loopy --engine claude ...
 ```
 
 If your Claude setup needs a specific permission mode for non-interactive edits, include that flag in

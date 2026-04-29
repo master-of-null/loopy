@@ -21,8 +21,9 @@ def main(argv: list[str] | None = None) -> int:
         target=target,
         original_task=original_task,
         runs_dir=args.runs_dir.resolve(),
-        implementer_dir=args.implementer_dir.resolve(),
-        reviewer_dir=args.reviewer_dir.resolve(),
+        implementer_dir=_resolve_prompt_dir(args.implementer_dir, "implementer"),
+        evaluator_dir=_resolve_prompt_dir(args.evaluator_dir, "evaluator"),
+        reviewer_dir=_resolve_prompt_dir(args.reviewer_dir, "reviewer"),
         max_iters=args.max_iters,
     )
 
@@ -66,14 +67,17 @@ def _build_parser() -> ArgumentParser:
     parser.add_argument(
         "--implementer-dir",
         type=Path,
-        default=Path("prompts/implementer"),
         help="Directory of markdown prompts run for implementation.",
     )
     parser.add_argument(
         "--reviewer-dir",
         type=Path,
-        default=Path("prompts/reviewer"),
         help="Directory of markdown prompts run for review.",
+    )
+    parser.add_argument(
+        "--evaluator-dir",
+        type=Path,
+        help="Directory of markdown prompts run for agentic validation.",
     )
     parser.add_argument(
         "--runs-dir",
@@ -99,6 +103,12 @@ def _load_task(args: object) -> str:
     if task_file:
         return task_file.read_text(encoding="utf-8")
     return task
+
+
+def _resolve_prompt_dir(value: Path | None, role: str) -> Path:
+    if value:
+        return value.resolve()
+    return Path(__file__).resolve().parents[2] / "prompts" / role
 
 
 if __name__ == "__main__":
